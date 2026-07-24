@@ -43,9 +43,6 @@ steps:
 **3. SCP'd files land with the wrong owner**
 Files copied in via SCP are owned by whatever the SSH deploy user resolves to (e.g. `1001:1001` or `1001:cpanelsuspended`), not the app's expected owner (`root:root` on vps3427251, `tomcat:tomcat` on vps3460762). Deployment still worked since Tomcat could read the file, but it's inconsistent with every other WAR in the folder and a latent risk if Tomcat or another process ever needs to overwrite/delete it as its usual service user. Fixed by adding a step that SSHs back in after the copy and runs `chown` (and `chown -R` on the exploded directory) using the ownership convention already in use on that server.
 
-**4. Private key exposure**
-While generating the SSH keypair, the private key contents got shown on-screen in a screenshot shared for troubleshooting. Any private key that's been displayed outside of secure secret storage should be treated as compromised — rotate it (new keypair, swap `authorized_keys` on both servers, update the `DEPLOY_SSH_KEY` GitHub secret) rather than relying on deleting the exposed copy after the fact.
-
 ## Result
 
 First full run succeeded end-to-end: build + local deploy on `dev.wirepick.com`, then SCP + auto-deploy to both `vps3427251` and `vps3460762`, with every other app's files left untouched and ownership now matching each server's convention.
