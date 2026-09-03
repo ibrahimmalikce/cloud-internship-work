@@ -15,4 +15,4 @@ Real-world issues encountered and resolved during hands-on sysadmin/DevOps work.
 ## Environment
 
 Beyond Systems IT Internship — Lagos, Nigeria
-Servers: Dell PowerEdge R420, AlmaLinux
+Servers: Dell PowerEdge R420, Dell PowerEdge (R820), AlmaLinux
