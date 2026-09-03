@@ -10,6 +10,7 @@ Real-world issues encountered and resolved during hands-on sysadmin/DevOps work.
 | github-actions-runner-setup.md | GitHub Actions self-hosted runner setup on AlmaLinux 9 |
 | adminapiREADME.md | CI/CD for an admin API |
 | multi-server-cicd-deploy.md | Extending GitHub Actions CI/CD to deploy the same build across multiple Tomcat servers |
+| bare-metal-provisioning.md| Bare-metal server provisioning: Physical assembly, BIOS flash, RAID 1 setup, and AlmaLinux 9 OS deployment |
 
 ## Environment
 
