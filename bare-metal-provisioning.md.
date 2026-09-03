@@ -1,0 +1,42 @@
+# Bare-Metal Server Provisioning: Dell PowerEdge 
+
+## Overview
+This document outlines the end-to-end provisioning of a bare-metal enterprise server. The project covers low-level physical hardware installation, firmware flashing, storage virtualization, and the deployment of a minimal Linux server environment. This setup serves as the physical foundation required before deploying hypervisors, container orchestration tools (like Kubernetes), or automated configuration management (like Ansible).
+
+## Technical Stack & Hardware
+* **Hardware:** Dell PowerEdge (R820)
+* **Storage Controller:** PERC H710 
+* **Storage Architecture:** Hardware RAID 1 (Mirroring)
+* **Operating System:** AlmaLinux 9.8 (Minimal)
+* **Management Tools:** Dell Lifecycle Controller, UEFI Boot Manager
+
+## Provisioning Workflow
+
+### 1. Physical Hardware Installation
+* Executed the physical assembly of the storage hardware by securely mounting the new solid-state drives (SSDs) into the Dell drive caddies.
+* Slotted and locked the configured drive sleds into the server's front-facing hot-swap bays to establish a clean connection with the SAS/SATA backplane.
+
+### 2. BIOS & Firmware Flashing
+* Identified out-of-date system BIOS and sourced the native 64-bit Windows Update Package (`.EXE`) for BIOS version 2.7.0.
+* Mounted the payload via a local USB drive.
+* Utilized the **Dell Lifecycle Controller (F10)** to apply the firmware update directly from the hardware level, bypassing the need for a host OS.
+
+### 3. Hardware RAID Configuration
+* Accessed the Configuration Wizards via the Lifecycle Controller to interface with the PERC H710 controller.
+* Initialized the newly installed physical SSDs.
+* Configured a **RAID 1 array** to ensure data redundancy, fault tolerance, and high availability at the physical storage layer.
+* Successfully presented the mirrored drives to the system as a single Virtual Disk.
+
+### 4. Operating System Deployment
+* Flashed an AlmaLinux 9 Minimal ISO to a bootable USB.
+* Booted the server via the UEFI Boot Manager (F11).
+* Configured the AlmaLinux installer to target the newly created hardware RAID Virtual Disk.
+* Set up root access and explicitly enabled **Root SSH login** to allow for immediate remote administration and integration with CI/CD or automation pipelines.
+
+### 5. Post-Installation & Verification
+* Handled SquashFS unmounting processes to transition the server from the installation media to local storage.
+* Verified successful OS boot from the logical block device (`dm-0`).
+* Validated local root access via the headless command-line interface.
+
+## Key Takeaways
+This deployment reinforces the critical bridge between physical hardware and cloud environments. Successfully racking and installing physical drives, configuring hardware-level RAID, navigating out-of-band management interfaces, and executing headless Linux installations are essential prerequisites for engineering resilient, on-premises infrastructure and hybrid cloud architectures.
