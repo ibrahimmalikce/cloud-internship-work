@@ -1,0 +1,254 @@
+# Site-to-Site VPN: AWS VPC ↔ Simulated On-Prem (strongSwan)
+
+A hands-on lab where I connect an AWS VPC to a simulated "on-prem" network over an IPsec Site-to-Site VPN, using Terraform for the AWS side and strongSwan on an Ubuntu EC2 instance as the customer gateway.
+
+**Author:** Malik · Cloud & DevOps Engineering
+**Stack:** AWS (VPC, Virtual Private Gateway, Site-to-Site VPN), Terraform, strongSwan, Ubuntu 22.04
+
+> ⚠️ All IPs, IDs and keys in this doc are placeholders (`203.0.113.x` and `198.51.100.x` are reserved documentation ranges). 
+
+---
+
+## 1. What I'm building
+
+```
+        "Cloud" VPC  10.20.0.0/16                    "On-Prem" VPC  192.168.10.0/24
+   ┌──────────────────────────────┐              ┌──────────────────────────────────┐
+   │  Private subnet 10.20.1.0/24 │              │  Subnet 192.168.10.0/24          │
+   │  ┌────────────┐              │              │  ┌────────────┐  ┌─────────────┐ │
+   │  │ app-server │              │              │  │ onprem-    │  │ onprem-     │ │
+   │  │ 10.20.1.10 │              │              │  │ client     │  │ router      │ │
+   │  └────────────┘              │              │  │ 192.168.   │  │ (strongSwan)│ │
+   │        │ route propagation   │              │  │ 10.20      │  │ EIP         │ │
+   │  ┌─────▼──────┐              │   IPsec      │  └─────┬──────┘  │ 203.0.113.10│ │
+   │  │    VGW     │◄─────────────┼──────────────┼────────┴─────────►└─────────────┘ │
+   │  └────────────┘   Tunnel 1   │  (internet)  │   route: 10.20.0.0/16 → router   │
+   └──────────────────────────────┘              └──────────────────────────────────┘
+```
+
+**Goal:** `onprem-client` (192.168.10.20) can reach `app-server` (10.20.1.10) privately, and vice versa, with no public exposure of the app server.
+
+## 2. Prerequisites
+
+- AWS account + CLI configured (`aws sts get-caller-identity` works)
+- Terraform ≥ 1.5
+- An EC2 key pair for SSH
+- Basic understanding of CIDR, routing tables, and security groups
+
+## 3. IP plan (do this first!)
+
+| Network | CIDR | Notes |
+|---|---|---|
+| Cloud VPC | `10.20.0.0/16` | Private subnet `10.20.1.0/24` |
+| On-prem (simulated) | `192.168.10.0/24` | Router + client |
+| Customer gateway IP | Elastic IP on the router | Must be a static public IP |
+
+CIDRs **must not overlap**. (I learned this the hard way, see Hiccup #1.)
+
+## 4. AWS side (Terraform)
+
+Key resources. Full code lives in [`/terraform`](./terraform).
+
+```hcl
+resource "aws_vpn_gateway" "vgw" {
+  vpc_id = aws_vpc.cloud.id
+  tags   = { Name = "s2s-lab-vgw" }
+}
+
+resource "aws_customer_gateway" "cgw" {
+  bgp_asn    = 65000                       # required by the API even for static routing
+  ip_address = aws_eip.onprem_router.public_ip
+  type       = "ipsec.1"
+  tags       = { Name = "s2s-lab-cgw" }
+}
+
+resource "aws_vpn_connection" "s2s" {
+  vpn_gateway_id       = aws_vpn_gateway.vgw.id
+  customer_gateway_id  = aws_customer_gateway.cgw.id
+  type                 = "ipsec.1"
+  static_routes_only   = true
+  tunnel1_ike_versions = ["ikev2"]
+  tunnel1_preshared_key = var.tunnel1_psk  # sensitive variable, never hard-code
+}
+
+# Tell AWS which prefix lives on the other side
+resource "aws_vpn_connection_route" "onprem" {
+  destination_cidr_block = "192.168.10.0/24"
+  vpn_connection_id      = aws_vpn_connection.s2s.id
+}
+
+# Push that route into the cloud route table automatically
+resource "aws_vpn_gateway_route_propagation" "private" {
+  vpn_gateway_id = aws_vpn_gateway.vgw.id
+  route_table_id = aws_route_table.cloud_private.id
+}
+```
+
+Security group on `app-server`: allow ICMP + SSH **from `192.168.10.0/24`** only.
+
+Get the tunnel outside IP after apply:
+
+```bash
+terraform apply
+aws ec2 describe-vpn-connections \
+  --query 'VpnConnections[0].Options.TunnelOptions[0].OutsideIpAddress'
+# → "198.51.100.25"
+```
+
+> **Security note:** the PSK ends up in Terraform state. Keep state in an encrypted remote backend (S3 + DynamoDB lock) and add `*.tfstate*` to `.gitignore`.
+
+## 5. On-prem side (strongSwan router)
+
+### 5.1 Launch the router
+- Ubuntu 22.04, `t3.micro`, in the on-prem VPC, with an **Elastic IP** (that's the CGW IP).
+- Security group: UDP **500**, UDP **4500**, SSH from my IP, all traffic from `192.168.10.0/24`.
+- **Disable source/dest check** on the instance (it forwards traffic that isn't for itself).
+
+### 5.2 Install and enable forwarding
+
+```bash
+sudo apt update && sudo apt install -y strongswan strongswan-starter
+
+cat <<'EOF' | sudo tee /etc/sysctl.d/99-vpn.conf
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+EOF
+sudo sysctl --system
+```
+
+### 5.3 `/etc/ipsec.conf`
+
+```conf
+config setup
+    charondebug="ike 1, knl 1, cfg 0"
+    uniqueids=no
+
+conn aws-tunnel1
+    auto=start
+    keyexchange=ikev2
+    type=tunnel
+    authby=secret
+    left=%defaultroute
+    leftid=203.0.113.10          # the Elastic IP, NOT the private IP
+    leftsubnet=192.168.10.0/24
+    right=198.51.100.25          # AWS tunnel 1 outside IP
+    rightsubnet=10.20.0.0/16
+    ike=aes256-sha256-modp2048
+    esp=aes256-sha256-modp2048
+    ikelifetime=8h
+    lifetime=1h
+    keyingtries=%forever
+    dpddelay=10s
+    dpdtimeout=30s
+    dpdaction=restart
+```
+
+### 5.4 `/etc/ipsec.secrets`
+
+```
+203.0.113.10 198.51.100.25 : PSK "REPLACE_WITH_TUNNEL1_PSK"
+```
+
+```bash
+sudo chmod 600 /etc/ipsec.secrets
+sudo systemctl restart strongswan-starter
+```
+
+### 5.5 Route on-prem traffic to the router
+In the on-prem VPC route table: `10.20.0.0/16 → eni-of-onprem-router`.
+
+## 6. Verification
+
+```bash
+# On the router
+sudo ipsec statusall
+# aws-tunnel1[1]: ESTABLISHED 4 minutes ago, 10.0.0.x[203.0.113.10]...198.51.100.25
+# aws-tunnel1{1}: INSTALLED, TUNNEL, ESP in UDP SPIs ...
+
+# AWS side
+aws ec2 describe-vpn-connections \
+  --query 'VpnConnections[0].VgwTelemetry[].[OutsideIpAddress,Status,StatusMessage]' \
+  --output table
+# Tunnel 1 → UP     Tunnel 2 → DOWN
+
+# From onprem-client
+ping -c 4 10.20.1.10
+ssh ec2-user@10.20.1.10
+```
+
+Result: ping and SSH both work across the tunnel, in both directions. ✅
+
+## 7. Hiccups (the honest part)
+
+### #1: Overlapping CIDRs
+**Symptom:** Tunnel came up but nothing routed correctly.
+**Cause:** I'd originally used `10.0.0.0/16` for both VPCs (Terraform defaults are dangerous).
+**Fix:** Re-planned to `10.20.0.0/16` and `192.168.10.0/24`, then `terraform destroy` and re-apply. Lesson: **plan IP space before writing any code.**
+
+### #2: `ipsec.conf` was being ignored
+**Symptom:** `ipsec statusall` showed no connections at all.
+**Cause:** On Ubuntu 22.04 the `strongswan` package alone uses the newer `swanctl` config. My classic `ipsec.conf` wasn't read.
+**Fix:** `sudo apt install strongswan-starter` and restart `strongswan-starter` (not `strongswan`).
+
+### #3: Tunnel stuck DOWN, IKE retransmits
+**Symptom:** AWS console showed the tunnel DOWN. Router log: `sending retransmit 1 of request message ID 0`, and nothing came back.
+**Cause:** Two things stacked up:
+1. Security group didn't allow **UDP 500 / 4500**.
+2. I first set `leftid` to the instance's **private** IP. Because the instance sits behind the Elastic IP's 1:1 NAT, AWS expects the **public** IP as the identity.
+
+**Fix:** Opened UDP 500/4500 and set `leftid=<Elastic IP>`. Tunnel went UP within about 30 seconds.
+
+### #4: Tunnel UP, but ping fails
+**Symptom:** Both sides showed established, yet `ping` from client to app server timed out.
+**Cause (three layers, found one at a time):**
+1. **Source/dest check** was still enabled on the router, so AWS silently dropped forwarded packets.
+2. **Route propagation** wasn't enabled, so the cloud route table had no `192.168.10.0/24` route (return traffic had nowhere to go).
+3. The app server's security group only allowed SSH, not **ICMP**.
+
+**Fix:** Disabled source/dest check, added the `aws_vpn_gateway_route_propagation` resource, and opened ICMP from `192.168.10.0/24`.
+**Debug tip:** `sudo tcpdump -ni any esp or udp port 4500` on the router shows whether packets are entering the tunnel and whether replies come back.
+
+### #5: SSH connects, then hangs on larger output
+**Symptom:** Ping fine, SSH login fine, but `cat` on a big file or `scp` froze.
+**Cause:** Classic MTU/MSS problem: IPsec adds overhead, so full-size TCP packets get fragmented or dropped.
+**Fix:** Clamped MSS on the router:
+
+```bash
+sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN \
+  -j TCPMSS --set-mss 1379
+```
+
+(Persist with `iptables-persistent`. AWS docs give exact values depending on the algorithms you use.)
+
+### #6: Tunnel 2 permanently DOWN
+**Not a bug:** AWS provisions two tunnels for redundancy, and I only configured one, so the connection shows as degraded. For a real production link, configure both tunnels (ideally BGP) and set a CloudWatch alarm on `TunnelState`. For this lab I accepted it.
+
+## 8. Cost & cleanup
+
+The VPN connection is billed hourly (roughly $0.05/hr, so check current pricing), plus EC2 and the Elastic IP. **Destroy when done:**
+
+```bash
+terraform destroy
+```
+
+## 9. What I'd do differently / next steps
+
+- Use **BGP** (dynamic routing) instead of static routes
+- Configure **both tunnels** for HA
+- Move from policy-based to **route-based (VTI)** on the router
+- Add CloudWatch alarms on tunnel state
+- Try AWS Transit Gateway for multi-VPC setups
+
+## 10. Key takeaways
+
+1. Plan CIDRs first. Overlap kills everything.
+2. Six things must line up for a working tunnel: **identity, PSK, ports (500/4500), routes on both sides, source/dest check, security groups.**
+3. "Tunnel UP" ≠ "traffic flows". Always test end-to-end.
+4. MTU problems look like random hangs, so remember MSS clamping.
+
+## 11. References
+
+- [AWS Site-to-Site VPN User Guide](https://docs.aws.amazon.com/vpn/latest/s2svpn/VPC_VPN.html)
+- [strongSwan Documentation](https://docs.strongswan.org/)
+- [Terraform `aws_vpn_connection`](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpn_connection)
