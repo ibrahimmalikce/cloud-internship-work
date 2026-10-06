@@ -12,6 +12,7 @@ Real-world issues encountered and resolved during hands-on sysadmin/DevOps work.
 | multi-server-cicd-deploy.md | Extending GitHub Actions CI/CD to deploy the same build across multiple Tomcat servers |
 | bare-metal-provisioning.md| Bare-metal server provisioning: Physical assembly, BIOS flash, RAID 1 setup, and AlmaLinux 9 OS deployment |
 | Site-to-Site VPN: AWS VPC ↔ Simulated On-Prem (strongSwan).md| A hands-on lab where I connect an AWS VPC to a simulated "on-prem" network over an IPsec Site-to-Site VPN, using Terraform for the AWS side and strongSwan on an Ubuntu EC2 instance as the customer gateway.  |
+| Artemis consumer stop | Investigated the issue of consumers stopping in the Artemis system. |
 
 ## Environment
 
