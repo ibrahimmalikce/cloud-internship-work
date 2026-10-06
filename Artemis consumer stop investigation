@@ -1,0 +1,45 @@
+Investigation: Consumers Stopped Fetching from Artemis
+
+Date of logs: 2026-10-03 System: SMPP gateway app (Spring + JMS) consuming from Apache Artemis Status: Root cause narrowed to app shutdown/restart; trigger still to be confirmed
+
+Summary
+
+Consumers on the wpk-sms-send queue stopped because the application was shut down and restarted, not because of an Artemis fault. The logs do not show who or what triggered the shutdowns.
+
+Findings
+Time (3 Oct)	Event
+13:07:19	Context closing - unbinding all SMPP sessions (shutdown began)
+13:07:31	DefaultMessageListenerContainer: listener setup for wpk-sms-send failed with java.lang.InterruptedException
+13:07:42	Application starting again
+13:07:51	Application started (about 9.6 s)
+13:28:37	Shut down again. No startup entry after this in root.log
+
+Other observations:
+
+The Artemis client logs had 0 errors, warnings or exceptions.
+No AMQ error codes, slow-consumer messages, or connection-loss messages appeared.
+The InterruptedException is a side effect of the listener being interrupted during shutdown.
+Messages were migrated from the DB queue back to the Artemis queue between 13:03 and 13:26, which shows messages were backing up in the DB queue.
+root.log has no startup after 13:28:37, but another log was still being written until 14:27, so it is unconfirmed whether the app came back up.
+How the logs were analysed
+Download the log archive from the server (e.g. with pscp), and unzip it.
+Search the Artemis logs for errors:
+bash
+   grep -ciE "error|exception|warn" artemis*.log*
+Look for warnings and errors in the main app log:
+bash
+   grep -E " ERROR | WARN " root.log | cut -c1-250 | head -30
+Find the shutdown and startup events:
+bash
+   grep -inE "shutdown|stopping|closing|Started .* in" root.log | cut -c1-200
+Check how many messages were migrated per hour:
+bash
+   grep "migrated" autoMigrate.log | cut -c1-13 | sort | uniq -c
+Notes for Windows users
+In Git Bash, use forward slashes in paths (C:/temp/), because C:\temp loses its backslash.
+Linux-only commands (last, journalctl, ps -ef) must be run on the server, not locally.
+Next steps
+Confirm whether Tomcat was restarted or a deployment was done at about 13:07 and 13:28.
+Check the Tomcat catalina.out on the server for the cause of the 13:28 shutdown (for example OutOfMemoryError or a normal stop sequence).
+Confirm the application is currently running.
+Consider alerting on Context closing events so unexpected restarts are noticed quickly.
